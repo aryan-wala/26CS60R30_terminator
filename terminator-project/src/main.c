@@ -163,6 +163,22 @@ static int text_width(App *app, const char *text, int length)
     return app->font ? XTextWidth(app->font, text, length) : length * 8;
 }
 
+/* Return a visual line break that fits the available pixels, preferring the
+   last space before the edge. A single long word is split when necessary. */
+static size_t wrapped_end(App *app, const char *text, size_t start, size_t length,
+                          int available)
+{
+    size_t end = start, space = start;
+    while (end < length && text_width(app, text + start, (int)(end + 1 - start)) <= available) {
+        if (isspace((unsigned char)text[end])) space = end;
+        ++end;
+    }
+    if (end == length) return end;
+    if (end == start) return start + 1;
+    if (space > start) return space + 1;
+    return end;
+}
+
 static void draw_tab_bar(App *app)
 {
     int x = 12;
@@ -200,6 +216,7 @@ static void draw_app(App *app)
     size_t end = total > v->scroll_offset ? total - v->scroll_offset : 0;
     size_t first = end > (size_t)content_rows ? end - (size_t)content_rows : 0;
     int selecting_completion = v->completion_pending && v->completion_count > 9;
+    size_t visual_extra = 0;
     size_t cursor_line = 0;
     if (!selecting_completion)
         for (size_t i = 0; i < v->cursor; ++i) if (v->input[i] == '\n') ++cursor_line;
@@ -207,15 +224,33 @@ static void draw_app(App *app)
     size_t cursor_column = selecting_completion ? strlen(v->completion_number) : v->cursor - cursor_line_start;
     int cursor_x = 12, cursor_y = 44;
     for (size_t row = first; row < end; ++row) {
-        int y = 44 + (int)(row - first) * line_height;
+        int y = 44 + (int)(row - first + visual_extra) * line_height;
         if (row < v->line_count) {
             const char *line = v->lines[row];
-            XDrawString(app->display, app->window, app->gc, 12, y, line, (int)strlen(line));
+            size_t length = strlen(line), offset = 0;
+            while (offset < length) {
+                size_t finish = wrapped_end(app, line, offset, length, app->width - 24);
+                if (finish <= offset) break;
+                while (finish > offset && isspace((unsigned char)line[finish - 1])) --finish;
+                XDrawString(app->display, app->window, app->gc, 12, y, line + offset, (int)(finish - offset));
+                offset = finish;
+                while (offset < length && isspace((unsigned char)line[offset])) ++offset;
+                if (offset < length) { ++visual_extra; y += line_height; }
+            }
             continue;
         }
         if (partial_output_length && row == v->line_count) {
             const char *line = v->lines[v->line_count];
-            XDrawString(app->display, app->window, app->gc, 12, y, line, (int)partial_output_length);
+            size_t offset = 0;
+            while (offset < partial_output_length) {
+                size_t finish = wrapped_end(app, line, offset, partial_output_length, app->width - 24);
+                if (finish <= offset) break;
+                while (finish > offset && isspace((unsigned char)line[finish - 1])) --finish;
+                XDrawString(app->display, app->window, app->gc, 12, y, line + offset, (int)(finish - offset));
+                offset = finish;
+                while (offset < partial_output_length && isspace((unsigned char)line[offset])) ++offset;
+                if (offset < partial_output_length) { ++visual_extra; y += line_height; }
+            }
             continue;
         }
 
@@ -238,17 +273,28 @@ static void draw_app(App *app)
         size_t line_text_length = selecting_completion ? strlen(v->completion_number) : finish - begin;
         size_t visible_start = 0;
         size_t line_cursor = line == cursor_line ? cursor_column : line_text_length;
-        if (line == cursor_line) {
-            while (visible_start < line_cursor &&
-                   text_width(app, line_text + visible_start,
-                              (int)(line_cursor - visible_start)) > available_width)
-                ++visible_start;
+        size_t offset = visible_start;
+        int cursor_drawn = 0;
+        while (offset < line_text_length) {
+            size_t finish = wrapped_end(app, line_text, offset, line_text_length, available_width);
+            if (finish <= offset) break;
+            XDrawString(app->display, app->window, app->gc,
+                        offset == visible_start ? text_x : 12, y,
+                        line_text + offset, (int)(finish - offset));
+            if (line == cursor_line && cursor_column >= offset && cursor_column <= finish) {
+                cursor_x = (offset == visible_start ? text_x : 12) +
+                           text_width(app, line_text + offset, (int)(cursor_column - offset));
+                cursor_y = y;
+                cursor_drawn = 1;
+            }
+            offset = finish;
+            while (offset < line_text_length && isspace((unsigned char)line_text[offset])) ++offset;
+            if (offset < line_text_length) { ++visual_extra; y += line_height; }
         }
-        XDrawString(app->display, app->window, app->gc, text_x, y,
-                    line_text + visible_start, (int)(line_text_length - visible_start));
-        if (line == cursor_line) {
-            cursor_x = text_x + text_width(app, line_text + visible_start,
-                                            (int)(line_cursor - visible_start));
+        if (line == cursor_line && !cursor_drawn) {
+            if (line_cursor == line_text_length)
+                cursor_x = (offset == visible_start ? text_x : 12) + text_width(app, line_text + offset,
+                    (int)(line_cursor - offset));
             cursor_y = y;
         }
     }
@@ -343,6 +389,27 @@ static void submit_input(App *app)
             v->input[v->length] = '\0'; v->cursor = v->length;
             v->continuation = 1;
         }
+        return;
+    }
+    /* Clearing is a display operation owned by the UI. Record it in the
+       normal shared history, then reset only this tab's scrollback. */
+    const char *command = v->input;
+    while (isspace((unsigned char)*command)) ++command;
+    size_t command_length = strlen(command);
+    while (command_length && isspace((unsigned char)command[command_length - 1]))
+        --command_length;
+    if (command_length == 5 && memcmp(command, "clear", 5) == 0) {
+        history_add(&app->history, v->input);
+        memset(v->lines, 0, sizeof(v->lines));
+        v->line_count = 0;
+        v->scroll_offset = 0;
+        v->input[0] = '\0';
+        v->length = v->cursor = 0;
+        v->continuation = 0;
+        v->history_browse = 0;
+        v->completion_pending = 0;
+        v->completion_count = 0;
+        v->completion_number[0] = '\0';
         return;
     }
     char echoed[TERM_INPUT_CAP + 64];
@@ -674,7 +741,9 @@ static void handle_key(App *app, XKeyEvent *event)
         memmove(v->input + v->cursor, v->input + old_cursor, v->length - old_cursor + 1);
         v->length -= old_cursor - v->cursor;
     } else if (binding_matches(app, event, BIND_CLEAR)) {
-        memset(v->lines, 0, sizeof(v->lines)); v->line_count = 0;
+        memset(v->lines, 0, sizeof(v->lines));
+        v->line_count = 0;
+        v->scroll_offset = 0;
     } else if (binding_matches(app, event, BIND_EOF)) {
         if (!v->length && !tab->busy) close_active_tab(app);
     } else if (left && v->cursor) --v->cursor;
