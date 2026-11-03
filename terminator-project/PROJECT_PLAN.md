@@ -4,10 +4,6 @@
 
 The implementation was assembled in one accelerated pass because the user moved the completion target to today. It now includes the required Tasks 1–8 and both tab worker modes, plus the selected History and Autocomplete bonus features. Task 11's Bash script interpreter remains out of scope. The project builds on this Mac against XQuartz; both worker modes have been launched and their GUI/worker processes observed. Command-by-command interaction has not yet been manually checked in the XQuartz window, so the user should run the short walkthrough in the README before submission. The older five-day schedule below is the original study plan and no longer describes the remaining implementation work.
 
-**Course deadline:** November 3, 2026, 11:59 PM  
-**Our target:** finish and freeze the submission on November 2, 2026  
-**Workspace:** new `terminator-project/` directory; existing X11 folder is reference material only.
-
 ## Scope decision: required work, bonus work, and out of scope
 
 The clarified rubric takes precedence over the original brief's any-10-of-11 wording:
